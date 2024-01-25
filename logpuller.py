@@ -1,37 +1,23 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # DESCRIPTION:
-# McAfee Web Gateway Cloud Service (WGCS) Logpuller Script.
+# Skyhigh SSE SWG Logpuller Script.
 #
-# Script to get McAfee Web Gateway Cloud Service logs from McAfee SaaS-API.
+# Script to get Skyhigh SSE SWG logs from Skyhigh REST API.
 # Logs are downloaded to 'OutputLog.$NowUnixEpoch$.csv' and can be forwarded
 # to a remote syslog host or SIEM when 'syslogEnable' is set to 'True'.
 # When forwarding is used the downloaded CSV is transformed into a JSON stream.
 # Configure your syslog/SIEM input correspondingly.
 #
-# The script is using McAfee SaaS Message API ver. 5; Field reference:
-# https://docs.mcafee.com/bundle/web-gateway-cloud-service-product-guide/page/GUID-BDF3E4F1-1625-4569-BE80-D528CE521BC1.html
+# The script is using Skyhigh REST API ver. 11; Field reference:
+# https://success.skyhighsecurity.com/Skyhigh_Secure_Web_Gateway_(Cloud)/Using_the_REST_API_for_Reporting/Reporting_Fields
 #
 # 
 # CHANGELOG:
+# 2.0b  2024-01-25 - To adjust for Skyhigh Security, multiple regions and support for FWaaS, RBI and PrivateAccess logs
 # 1.1  2020-05-03 - Config option to set the output dir for downloaded CSV files
 # 1.0  2020-05-02 - initial release (Happy Birthday Adam!)
 #
-################################################################################
-# Copyright (C) 2020 Daniel Schindler, daniel.schindler@steag.com
-#
-# This program is free software; you can redistribute it and/or modify it under
-# the terms of the GNU General Public License as published by the Free Software
-# Foundation; either version 3 of the License, or (at your option) any later
-# version.
-#
-# This program is distributed in the hope that it will be useful, but WITHOUT
-# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along with
-# this program; if not, see <http://www.gnu.org/licenses>.
-################################################################################
 
 import argparse
 import configparser
@@ -48,59 +34,77 @@ from io import StringIO
 import requests
 from requests.auth import HTTPBasicAuth
 
-
 # small help for script; path to custom configuration file can be passed
-helper = argparse.ArgumentParser(description='''McAfee Web Gateway Cloud Service (WGCS) Log Puller Script.''')
-helper.add_argument('--config', help='path to custom configuration file (default: <scriptname>.conf)', nargs='?', default=os.path.splitext(__file__)[0] + '.conf')
+helper = argparse.ArgumentParser(description='''Skyhigh SSE SWG Log Puller Script.''')
+helper.add_argument('--config', help='path to custom configuration file (default: <scriptname>.conf)', nargs='?',
+                    default=os.path.splitext(__file__)[0] + '.conf')
 args = helper.parse_args()
 
 # set path to custom config or default to $scriptname$.conf
-config = args.config
+config_filename = args.config
+
 # log will be $scriptname$.log
 log = os.path.splitext(__file__)[0] + '.log'
-try:
-    os.remove(log)
-except:
-    pass
 
-# set logging style 2020-05-03 00:51:02,954 <LEVEL>: <message> 
+# set logging style 2024-01-25 13:52:12,729 <LEVEL>: <message>
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', filename=log, level=logging.INFO)
 
 # first log lines
 logging.info('log=' + log)
-logging.info('config=' + config)
+logging.info('config=' + config_filename)
 
-# Path for request; effectively the search string for log messages
-saasPath = '/mwg/api/reporting/forensic/$saasCustomerID$?filter.requestTimestampFrom=$requestTimestampFrom$&amp;filter.requestTimestampTo=$requestTimestampTo$&amp;order.0' \
-           '.requestTimestamp=asc'
-# first line of response should be this when API version 5 used:
-fieldHeader = '"user_id","username","source_ip","http_action","server_to_client_bytes","client_to_server_bytes","requested_host","requested_path","result","virus",' \
-              '"request_timestamp_epoch","request_timestamp","uri_scheme","category","media_type","application_type","reputation","last_rule","http_status_code","client_ip",' \
-              '"location","block_reason","user_agent_product","user_agent_version","user_agent_comment","process_name","destination_ip","destination_port"'
+# first line of responses should be like this when API version 11 is used:
+field_reference = {
+    'swg': '"user_id","username","source_ip","http_action","server_to_client_bytes","client_to_server_bytes",'
+           '"requested_host","requested_path","result","virus","request_timestamp_epoch","request_timestamp",'
+           '"uri_scheme","category","media_type","application_type","reputation","last_rule","http_status_code",'
+           '"client_ip","location","block_reason","user_agent_product","user_agent_version","user_agent_comment",'
+           '"process_name","destination_ip","destination_port","pop_country_code","referer","ssl_scanned",'
+           '"av_scanned_up","av_scanned_down","rbi","dlp","client_system_name","filename","pop_egress_ip",'
+           '"pop_ingress_ip","proxy_port","mw_probability","discarded_host","ssl_client_prot","ssl_server_prot",'
+           '"domain_fronting_url"',
+    'rbi': '"user_id","username","source_ip","http_action","bytes_sc","bytes_cs","requested_host","requested_path",'
+           '"result","virus","request_timestamp_epoch","request_timestamp","uri_scheme","category","media_type",'
+           '"application_type","reputation","last_rule","http_status_code","client_ip","location","block_reason",'
+           '"user_agent_product","user_agent_version","user_agent_comment","process_name","destination_ip",'
+           '"destination_port","pop_country_code","referer","ssl_scanned","av_scanned_up","av_scanned_down","rbi",'
+           '"dlp","client_system_name","filename","pop_egress_ip","pop_ingress_ip","proxy_port","mw_probability",'
+           '"discarded_host","ssl_client_prot","ssl_server_prot","domain_fronting_url","site","action",'
+           '"action_reason","request_url","risk_score","mcp_yn","isolate_type","filename_upload","filename_download",'
+           '"filesize_upload,"filesize_download"',
+    'pa': '"request_timestamp","username","pa_application_name","requested_host","request_url","pa_app_group",'
+          '"pa_used_connector","device_profile","host_os_name","bytes_sc","bytes_cs","http_status_code",'
+          '"action","block_reason","virus"',
+    'firewall': '"request_timestamp","username","client_ip","destination_ip","process_name","client_port",'
+                '"destination_port","firewall_action","client_country","destination_country","application_name",'
+                '"policy_name","protocol","detected_protocol","connectivity_method","location","egress_client_port",'
+                '"tunnel_ingress_port","bytes_sc","bytes_cs","transaction_id", "client_host_name","host_os_name",'
+                '"scp_policy_name","process_exe_path"',
+}
+
 # request header for CSV download and API version
-requestHeaders = {'user-agent': 'logpuller/0.0.0.0', 'Accept': 'text/csv', 'x-mwg-api-version': '5'}
-requestTimestampFrom = 0
-chunkIncrement = 0
-# terminate request if no response within connectionTimeout
-connectionTimeout = 180
-totalLines = 0
+requestHeaders = {'user-agent': 'logpuller/2.0.0.b', 'Accept': 'text/csv', 'x-mwg-api-version': '11'}
+
 Now = int(time.time())
 requestTimestampTo = Now
+filename = 'OutputLog.$Region$.$TrafficType$.$Now$.csv'
 
 
-
-def readConfig(config):
-    global saasCustomerID, saasUserID, saasPassword, saasHost, requestTimestampFrom, chunkIncrement, connectionTimeout, outputDirCSV, proxyURL, syslogEnable, syslogHost, \
-        syslogPort, syslogProto, syslogKeepCSV
+def read_config():
+    global config_filename
+    global saasCustomerID, saasUserID, saasPassword, saasLoggingRegions, saasTrafficTypes, \
+        chunkIncrement, connectionTimeout, outputDirCSV, proxyURL, syslogEnable, syslogHost, syslogPort, \
+        syslogProto, syslogKeepCSV
     try:
-        with open(config, 'r') as f:
+        with open(config_filename, 'r') as f:
             cfgfile = f.read()
 
             parser = configparser.RawConfigParser(allow_no_value=True)
 
-            # make option names case sensitive (https://docs.python.org/2/library/configparser.html#ConfigParser.RawConfigParser.optionxform)
+            # make option names case sensitive
+            # (https://docs.python.org/2/library/configparser.html#ConfigParser.RawConfigParser.optionxform)
             parser.optionxform = str
-            parser.read_string((cfgfile))
+            parser.read_string(cfgfile)
 
             saasCustomerID = parser.getint('saas', 'saasCustomerID')
             logging.info('saasCustomerID=' + str(saasCustomerID))
@@ -109,25 +113,23 @@ def readConfig(config):
             logging.info('saasUserID=' + saasUserID)
 
             saasPassword = parser.get('saas', 'saasPassword')
-            # do not log saasPassword
 
-            saasHost = parser.get('saas', 'saasHost')
-            logging.info('saasHost=' + saasHost)
+            saasLoggingRegions = parser.get('saas', 'saasLoggingRegions')
+            logging.info('saasLoggingRegions=' + saasLoggingRegions)
 
-            requestTimestampFrom = parser.getint('request', 'requestTimestampFrom')
-            logging.info('requestTimestampFrom=' + str(requestTimestampFrom))
+            saasTrafficTypes = parser.get('saas', 'saasTrafficTypes')
+            logging.info('saasTrafficTypes=' + saasTrafficTypes)
 
             chunkIncrement = parser.getint('request', 'chunkIncrement')
             logging.info('chunkIncrement=' + str(chunkIncrement))
 
-            connectionTimeout = parser.getint('request', 'connectionTimeout')
+            connectionTimeout = parser.getint('request', 'connectionTimeout', fallback=180)
             logging.info('connectionTimeout=' + str(connectionTimeout))
 
             outputDirCSV = parser.get('request', 'outputDirCSV')
             logging.info('outputDirCSV=' + outputDirCSV)
 
             proxyURL = parser.get('proxy', 'proxyURL')
-            # do not log proxyURL - might contain user/password
 
             syslogEnable = parser.getboolean('syslog', 'syslogEnable')
             logging.info('syslogEnable=' + str(syslogEnable))
@@ -145,55 +147,53 @@ def readConfig(config):
             logging.info('syslogKeepCSV=' + str(syslogKeepCSV))
 
     except Exception as e:
-        logging.critical('readConfig(' + config + ')')
+        logging.critical('readConfig(' + config_filename + ')')
         logging.critical(str(e))
-        print('Exception: readConfig(' + config + ')')
-        sys.exit(1)
+        print('Exception: readConfig(' + config_filename + ')')
 
 
-
-def changeConfigTime(config, timeStamp, value):
-    logging.info('changeConfigTime(' + config + ',' + timeStamp + ',' + str(value) + ')')
+def write_config_item(attribute, value):
+    global config_filename
+    logging.debug('write_config_item(' + os.path.basename(config_filename) + ',' + attribute + '=' + str(value) + ')')
     try:
-        with open(config, 'r') as f:
+        with open(config_filename, 'r') as f:
             cfgfile = f.read()
             parser = configparser.RawConfigParser(allow_no_value=True)
-            # make option names case sensitive
+            # make option names case-sensitive
             parser.optionxform = str
             # get config in-memory
             parser.read_string(cfgfile)
-            # set new timeStamp in request section
-            parser.set('request', timeStamp, value)
+            # set new attribute in request section
+            parser.set('request', attribute, value)
             # open config file in writ mode
-            cfgfile = open(config, 'w')
+            cfgfile = open(config_filename, 'w')
             # write from in-memory to file
             parser.write(cfgfile)
             cfgfile.close()
-
     except Exception as e:
-        logging.critical('changeConfigTime(' + config + ',' + str(timeStamp) + ',' + str(value) + ')')
+        logging.critical('Error in write_config_item(' + os.path.basename(config_filename) +
+                         ',' + attribute + '=' + str(value) + ')')
         logging.critical(str(e))
-        print('Exception: changeConfigTime(' + config + ',' + str(timeStamp) + ',' + str(value) + ')')
-        sys.exit(1)
 
 
-
-def variableSubstitution(variable):
-    global saasCustomerID, saasUserID, saasPath, requestTimestampFrom, startTime, endTime
-    newVariable = str(variable)
-    newVariable = newVariable.replace("$saasCustomerID$", str(saasCustomerID))
-    newVariable = newVariable.replace("$saasUserID$", str(saasUserID))
-    newVariable = newVariable.replace('$requestTimestampFrom$', str(startTime))
-    newVariable = newVariable.replace('$requestTimestampTo$', str(endTime))
-
-    return newVariable
-
+def read_config_item(attribute):
+    global config_filename
+    logging.debug('read_config_item(' + os.path.basename(config_filename) + ',' + attribute + ')')
+    try:
+        with open(config_filename, 'r') as f:
+            parser = configparser.RawConfigParser(allow_no_value=True)
+            parser.optionxform = str
+            parser.read_file(f)
+            ret = parser.getint('request', attribute, fallback=0)
+            return ret
+    except Exception as e:
+        logging.critical('Error in read_config_item(' + os.path.basename(config_filename) + ',' + attribute + ')')
+        logging.critical(str(e))
 
 
 def syslogForwarder(saasFilename):
-    logging.info('Parsing CSV to JSON stream and forwarding to: ' + syslogHost + ', Port ' + str(syslogPort) + ' (' + syslogProto + ')')
-    # create empty in-memory file-like object for JSON transformation
-    jsonFile = StringIO()
+    logging.info('Parsing CSV to JSON stream and forwarding to: ' + syslogHost + ', Port ' + str(
+        syslogPort) + ' (' + syslogProto + ')')
     try:
         # read downloaded CSV and parse it into list
         with open(saasFilename, 'r') as csvFile:
@@ -202,7 +202,7 @@ def syslogForwarder(saasFilename):
 
         # now for each row in list make corresponding JSON stream and forward via TCP or UDP
         for row in rows:
-            message = json.dumps(row, jsonFile)
+            message = json.dumps(row)
             if syslogProto == 'TCP':
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.connect((syslogHost, syslogPort))
@@ -212,108 +212,137 @@ def syslogForwarder(saasFilename):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.sendto(message, (syslogHost, syslogPort))
 
-        if syslogKeepCSV == False:
+        if not syslogKeepCSV:
             logging.info('Clean up: deleting ' + saasFilename)
             os.remove(saasFilename)
 
     except Exception as e:
         logging.critical(str(e))
-        sys.exit(1)
 
 
+def getHostForRegion(region: str):
+    return "{}.logapi.skyhigh.cloud".format(region)
 
-# parse config file
-readConfig(config)
 
-if not proxyURL:
-    logging.info('Using direct connect for request')
-else:
-    # set proxy servers for request if needed
-    requestProxies = {'http': proxyURL, 'https': proxyURL}
-    logging.info('Using proxy for request')
+def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
+    global startTime, filename, chunkIncrement, requestHeaders, saasCustomerID
+    totalLines = 0
+    saasFilename = None
+    config_ts_entry_name = 'requestTimestampFrom.{}.{}'.format(region, traffic_type)
+    requestTimestampFrom = read_config_item(config_ts_entry_name)
+    # set start for Now - 24 hours if requestTimestampFrom is 0
+    if requestTimestampFrom == 0:
+        requestTimestampFrom = Now - (60 * 60 * 24)
 
-# set start for Now - 24 hours if requestTimestampFrom is 0
-if requestTimestampFrom == 0:
-    requestTimestampFrom = Now - 86400
+    # add headrer for different log types:
+    if traffic_type != 'swg':
+        requestHeaders[traffic_type] = "1"
 
-# ready to start making requests
-# must make requests in chunked increments
-chunkCount = 0
-for requestChunk in range(requestTimestampFrom, Now, chunkIncrement):
-    chunkCount += 1
-    startTime = requestChunk
-    endTime = requestChunk + chunkIncrement - 1 if requestChunk + chunkIncrement < Now else Now
+    # must make requests in chunked increments
+    chunkCount = 0
 
-    # change requestTimestampFrom and requestTimestampTo to requestChunk start/stop times
-    try:
-        requestPath = variableSubstitution(saasPath)
-        requestPath = 'https://' + saasHost + requestPath
-        requestLogLine = 'requestChunk: ' + str(chunkCount) + ', ' + str(datetime.utcfromtimestamp(startTime)) + '(' + str(startTime) + ') - ' + str(
-            datetime.utcfromtimestamp(endTime)) + '(' + str(endTime) + ')'
+    for requestChunk in range(requestTimestampFrom, Now, chunkIncrement):
+        chunkCount += 1
+        startTime = requestChunk
+        endTime = requestChunk + chunkIncrement - 1 if requestChunk + chunkIncrement < Now else Now
 
-        if not proxyURL:
-            r = requests.get(requestPath, headers=requestHeaders, auth=HTTPBasicAuth(saasUserID, saasPassword), timeout=connectionTimeout)
-        else:
-            r = requests.get(requestPath, proxies=requestProxies, headers=requestHeaders, auth=HTTPBasicAuth(saasUserID, saasPassword), timeout=connectionTimeout)
+        # change requestTimestampFrom and requestTimestampTo to requestChunk start/stop times
+        try:
+            requestLogLine = ' requestChunk: ' + str(chunkCount) + ', ' + str(
+                datetime.utcfromtimestamp(startTime)) + '(' + str(startTime) + ') - ' + str(
+                datetime.utcfromtimestamp(endTime)) + '(' + str(endTime) + ')'
 
-        # put response into variable
+            url = 'https://{}/mwg/api/reporting/forensic/{}'.format(getHostForRegion(region), saasCustomerID)
+            urlparams = {'filter.requestTimestampFrom': startTime,
+                         'filter.requestTimestampTo': endTime,
+                         'order.0.requestTimestamp': 'asc'}
 
-        # output = StringIO(r.text.decode('utf-8'))
-        output = StringIO(r.content.decode('utf-8'))
+            r = requests.get(url, params=urlparams, headers=requestHeaders, proxies=requestProxies,
+                             auth=HTTPBasicAuth(saasUserID, saasPassword), timeout=connectionTimeout)
 
-        if r.status_code != 200:
-            raise ValueError('Invalid response status: ' + str(r.status_code))
+            # put response into variable
+            output = StringIO(r.text)
 
-        responseLines = output.read().splitlines()
-        # if response is valid but has only 1 line, then it's just a header and should be ignored.    
-        if responseLines.__len__() <= 1:
-            logging.info(requestLogLine + ': no data')
+            if r.status_code != 200:
+                raise ValueError('Invalid response status: ' + str(r.status_code))
 
-        # first line of response should be fieldHeader
-        if responseLines[0] != fieldHeader:
-            logging.warning(requestLogLine + ': invalid first line: ' + responseLines[0])
+            responseLines = output.read().splitlines()
+            # if response is valid but has only 1 line, then it's just a header and should be ignored.
+            if len(responseLines) <= 2 and responseLines[0] == '':
+                logging.debug(requestLogLine + ': no data, next chunk')
+                continue
 
-        totalLines += responseLines.__len__() - 2
-        requestLogLine += ', response: ' + str(r.status_code) + ', responseLines: ' + str(responseLines.__len__()) + ', totalLines: ' + str(totalLines)
-        logging.info(requestLogLine)
+            # first line of response should be fieldHeader
+            if responseLines[0] != field_reference[traffic_type]:
+                logging.warning(requestLogLine + ": invalid first line: '{}'".format(responseLines[0]))
 
-        # Set output dir for downloaded CSV if set in config; else use script path
-        if not outputDirCSV:
-            saasFilename = os.path.join(sys.path[0], 'OutputLog.$Now$.csv')
-        else:
-            saasFilename = os.path.join(outputDirCSV, 'OutputLog.$Now$.csv')
+            totalLines += len(responseLines) - 2
+            requestLogLine += ', response: ' + str(r.status_code) + ', responseLines: ' + \
+                              str(len(responseLines)) + ', totalLines: ' + str(totalLines)
+            logging.debug(requestLogLine)
 
-        # if file does not exist, write the log headers
-        saasFilename = saasFilename.replace('$Now$', str(Now))
-        if not os.path.isfile(saasFilename):
-            logging.info('creating output file: ' + saasFilename)
-            try:
-                # with open(saasFilename, 'w+b') as outputFile:
-                with open(saasFilename, 'w') as outputFile:
-                    outputFile.write(fieldHeader + os.linesep)
-            except Exception as e:
-                logging.critical("Exception: can't write outputFile: " + saasFilename + ': ' + str(e))
-                sys.exit(1)
+            # Set output dir for downloaded CSV if set in config; else use script path
+            if not outputDirCSV:
+                saasFilename = os.path.join(sys.path[0], filename)
+            else:
+                saasFilename = os.path.join(outputDirCSV, filename)
 
-        # write the log records
-        # with open(saasFilename, 'a+b') as outputFile:
-        with open(saasFilename, 'a') as outputFile:
-            # exclude first line. it's the field headers
-            for line in range(1, responseLines.__len__()):
-                # exclude any blank lines
-                if responseLines[line] == '':
-                    continue
-                outputFile.write(responseLines[line] + os.linesep)
+            # if file does not exist, write the log headers
+            saasFilename = saasFilename.replace('$Now$', str(Now))
+            saasFilename = saasFilename.replace('$Region$', str(region))
+            saasFilename = saasFilename.replace('$TrafficType$', str(traffic_type))
+            if not os.path.isfile(saasFilename):
+                logging.info('creating output file: ' + saasFilename)
+                try:
+                    # with open(saasFilename, 'w+b') as outputFile:
+                    with open(saasFilename, 'w') as outputFile:
+                        outputFile.write(responseLines[0] + '\n')
+                except Exception as e:
+                    logging.critical("Exception: can't write outputFile: " + saasFilename + ': ' + str(e))
 
-    except Exception as e:
-        logging.critical(str(e))
-        sys.exit(1)
+            # write the log records
+            # with open(saasFilename, 'a+b') as outputFile:
+            with open(saasFilename, 'a') as outputFile:
+                logging.info('appending to output file: ' + saasFilename)
+                # exclude first line. it's the field headers
+                for line in range(1, len(responseLines)):
+                    # exclude any blank lines
+                    if responseLines[line] == '':
+                        continue
+                    outputFile.write(responseLines[line] + '\n')
 
-logging.info('Success: File:' + saasFilename + ', From: ' + str(datetime.utcfromtimestamp(startTime)) + '(' + str(startTime) + '), To: ' + str(
-    datetime.utcfromtimestamp(endTime)) + '(' + str(endTime) + '), totalLines: ' + str(totalLines) + ', chunkCount: ' + str(chunkCount))
+            logging.info("Success: File: {}, From: {}({}), To: {}({}), totalLines: {}, chunkCount: {}".format(
+                saasFilename, datetime.utcfromtimestamp(startTime), startTime,
+                datetime.utcfromtimestamp(endTime), endTime, totalLines, chunkCount)
+            )
 
-if syslogEnable == True:
-    syslogForwarder(saasFilename)
+        except Exception as e:
+            logging.critical(str(e))
 
-# finally set requestTimestampFrom for next run to current time of execution
-changeConfigTime(config, 'requestTimestampFrom', Now)
+        if syslogEnable:
+            syslogForwarder(saasFilename)
+
+    # finally set requestTimestampFrom for next run to current time of execution
+    write_config_item(config_ts_entry_name, endTime)
+
+
+if __name__ == '__main__':
+
+    # parse config file
+    logging.info("Reding config file")
+    read_config()
+
+    if not proxyURL:
+        logging.info('Using direct connect for request, no proxy configured')
+        requestProxies = None
+    else:
+        # set proxy servers for request if needed
+        requestProxies = {'http': proxyURL, 'https': proxyURL}
+        logging.info('Using proxy for request')
+
+    for query_region in saasLoggingRegions.split(','):
+        for query_log_type in saasTrafficTypes.split(','):
+            logging.info("Requesting log type '{}' for region '{}'".format(query_log_type, query_region))
+            getLogsByRegionAndType(region=query_region, traffic_type=query_log_type)
+
+    logging.info('Finished with queries, shutting down')
