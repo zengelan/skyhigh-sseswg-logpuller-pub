@@ -26,10 +26,8 @@ import json
 import logging
 import os
 import socket
-import sys
 import time
 from datetime import datetime
-from io import StringIO
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -71,7 +69,7 @@ field_reference = {
            '"dlp","client_system_name","filename","pop_egress_ip","pop_ingress_ip","proxy_port","mw_probability",'
            '"discarded_host","ssl_client_prot","ssl_server_prot","domain_fronting_url","site","action",'
            '"action_reason","request_url","risk_score","mcp_yn","isolate_type","filename_upload","filename_download",'
-           '"filesize_upload,"filesize_download"',
+           '"filesize_upload","filesize_download"',
     'pa': '"request_timestamp","username","pa_application_name","requested_host","request_url","pa_app_group",'
           '"pa_used_connector","device_profile","host_os_name","bytes_sc","bytes_cs","http_status_code",'
           '"action","block_reason","virus"',
@@ -94,7 +92,7 @@ def read_config():
     global config_filename
     global saasCustomerID, saasUserID, saasPassword, saasLoggingRegions, saasTrafficTypes, \
         chunkIncrement, connectionTimeout, outputDirCSV, proxyURL, syslogEnable, syslogHost, syslogPort, \
-        syslogProto, syslogKeepCSV
+        syslogProto, syslogKeepCSV, filename
     try:
         with open(config_filename, 'r') as f:
             cfgfile = f.read()
@@ -128,6 +126,8 @@ def read_config():
 
             outputDirCSV = parser.get('request', 'outputDirCSV')
             logging.info('outputDirCSV=' + outputDirCSV)
+            if outputDirCSV:
+                filename = os.path.join(outputDirCSV, filename)
 
             proxyURL = parser.get('proxy', 'proxyURL')
 
@@ -225,14 +225,14 @@ def getHostForRegion(region: str):
 
 
 def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
-    global startTime, filename, chunkIncrement, requestHeaders, saasCustomerID
+    global filename, chunkIncrement, requestHeaders, saasCustomerID, Now
     totalLines = 0
     saasFilename = None
     config_ts_entry_name = 'requestTimestampFrom.{}.{}'.format(region, traffic_type)
     requestTimestampFrom = read_config_item(config_ts_entry_name)
     # set start for Now - 24 hours if requestTimestampFrom is 0
     if requestTimestampFrom == 0:
-        requestTimestampFrom = Now - (60 * 60 * 24)
+        requestTimestampFrom = Now - (60 * 60 * 24 * 10)
 
     # add headrer for different log types:
     if traffic_type != 'swg':
@@ -245,6 +245,11 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
         chunkCount += 1
         startTime = requestChunk
         endTime = requestChunk + chunkIncrement - 1 if requestChunk + chunkIncrement < Now else Now
+
+        saasFilename = filename.replace(
+            '$Now$', str(Now)).replace(
+            '$Region$', region).replace(
+            '$TrafficType$', traffic_type)
 
         # change requestTimestampFrom and requestTimestampTo to requestChunk start/stop times
         try:
@@ -260,13 +265,13 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
             r = requests.get(url, params=urlparams, headers=requestHeaders, proxies=requestProxies,
                              auth=HTTPBasicAuth(saasUserID, saasPassword), timeout=connectionTimeout)
 
-            # put response into variable
-            output = StringIO(r.text)
+            logging.info(" request took {} to complete".format(r.elapsed))
 
             if r.status_code != 200:
+                logging.error('Invalid response status: ' + str(r.status_code) + r.text)
                 raise ValueError('Invalid response status: ' + str(r.status_code))
 
-            responseLines = output.read().splitlines()
+            responseLines = r.text.splitlines()
             # if response is valid but has only 1 line, then it's just a header and should be ignored.
             if len(responseLines) <= 2 and responseLines[0] == '':
                 logging.debug(requestLogLine + ': no data, next chunk')
@@ -274,23 +279,15 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
 
             # first line of response should be fieldHeader
             if responseLines[0] != field_reference[traffic_type]:
-                logging.warning(requestLogLine + ": invalid first line: '{}'".format(responseLines[0]))
+                logging.warning(
+                    requestLogLine + ": invalid first line for type '{}' : '{}'".format(traffic_type, responseLines[0]))
 
             totalLines += len(responseLines) - 2
             requestLogLine += ', response: ' + str(r.status_code) + ', responseLines: ' + \
                               str(len(responseLines)) + ', totalLines: ' + str(totalLines)
             logging.debug(requestLogLine)
 
-            # Set output dir for downloaded CSV if set in config; else use script path
-            if not outputDirCSV:
-                saasFilename = os.path.join(sys.path[0], filename)
-            else:
-                saasFilename = os.path.join(outputDirCSV, filename)
-
             # if file does not exist, write the log headers
-            saasFilename = saasFilename.replace('$Now$', str(Now))
-            saasFilename = saasFilename.replace('$Region$', str(region))
-            saasFilename = saasFilename.replace('$TrafficType$', str(traffic_type))
             if not os.path.isfile(saasFilename):
                 logging.info('creating output file: ' + saasFilename)
                 try:
@@ -329,7 +326,7 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
 if __name__ == '__main__':
 
     # parse config file
-    logging.info("Reding config file")
+    logging.info("Reading config file")
     read_config()
 
     if not proxyURL:
