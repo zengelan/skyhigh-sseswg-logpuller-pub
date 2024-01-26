@@ -33,7 +33,7 @@ This table explains the necessary configuration options:
 |  | ```saasPassword``` | STR (mandatory) | Your Skyhigh SSE tenant password | ```my53cr37p455``` |
 |  | ```saasLoggingRegions``` | STR (mandatory) | A list of regions to pull logs from, separated by comma | ```us,de,gb,sg,ae,in,au,sa``` |
 |  | ```saasTrafficTypes``` | STR (mandatory) | A list of log types, separated by comma | ```swg,rbi,pa,firewall``` |
-| ```request``` | ```requestTimestampFrom``` | INT (optional) | Epoch timestamp of last successful request; dynamically set to last execution time; if initially set to 0 value is dynamically adjusted to ```Now - 24h``` | ```1588458908``` |
+| ```request``` | ```requestTimestampFrom.REG.TYPE``` | INT (optional) | Epoch timestamp of last successful request for the specifc region and log type; dynamically set to last execution time; if 0 or not defined its set to ```Now - 24h``` | ```1588458908``` |
 |  | ```chunkIncrement``` | INT (mandatory) | Requests are splitted into chunks if time between last request and execution is bigger than this value (seconds) | ```3600``` |
 |  | ```connectionTimeout``` | INT (mandatory) | Time to wait for request response (seconds) | ```180``` |
 |  | ```outputDirCSV``` | STR (optional) | Specify different output directory for downloaded CSV file ```'OutputLog.$NowUnixEpoch$.csv'``` **IMPORTANT**: directoy must exist! | ```/var/tmp/sseswglogs``` |
