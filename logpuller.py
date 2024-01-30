@@ -28,6 +28,7 @@ import os
 import socket
 import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -42,13 +43,15 @@ args = helper.parse_args()
 config_filename = args.config
 
 # log will be $scriptname$.log
-log = os.path.splitext(__file__)[0] + '.log'
+logfile = os.path.splitext(__file__)[0] + '.log'
+
+logfile_handler = RotatingFileHandler(filename=logfile, backupCount=5, maxBytes=5000000)
 
 # set logging style 2024-01-25 13:52:12,729 <LEVEL>: <message>
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', filename=log, level=logging.INFO)
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', handlers=[logfile_handler], level=logging.INFO)
 
 # first log lines
-logging.info('log=' + log)
+logging.info('logfile=' + logfile)
 logging.info('config=' + config_filename)
 
 # first line of responses should be like this when API version 11 is used:
@@ -240,6 +243,13 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
 
     # must make requests in chunked increments
     chunkCount = 0
+    info_text = "Requesting: Region: {}, Logtype: {}, From: {}({}), To: {}({})".format(
+        region, traffic_type, datetime.utcfromtimestamp(requestTimestampFrom),
+        requestTimestampFrom, datetime.utcfromtimestamp(Now), Now
+    )
+
+    logging.info(info_text)
+    print(info_text)
 
     for requestChunk in range(requestTimestampFrom, Now, chunkIncrement):
         chunkCount += 1
@@ -265,7 +275,7 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
             r = requests.get(url, params=urlparams, headers=requestHeaders, proxies=requestProxies,
                              auth=HTTPBasicAuth(saasUserID, saasPassword), timeout=connectionTimeout)
 
-            logging.info(" request took {} to complete".format(r.elapsed))
+            logging.debug(" request took {} to complete".format(r.elapsed))
 
             if r.status_code != 200:
                 logging.error('Invalid response status: ' + str(r.status_code) + r.text)
@@ -319,6 +329,12 @@ def getLogsByRegionAndType(region: str, traffic_type=str('swg')):
         if syslogEnable:
             syslogForwarder(saasFilename)
 
+    info_text = "Success: File: {}, From: {}({}), To: {}({}), totalLines: {}, chunkCount: {}".format(
+        saasFilename, datetime.utcfromtimestamp(startTime), startTime,
+        datetime.utcfromtimestamp(endTime), endTime, totalLines, chunkCount)
+    logging.info(info_text)
+    print(info_text)
+
     # finally set requestTimestampFrom for next run to current time of execution
     write_config_item(config_ts_entry_name, endTime)
 
@@ -339,7 +355,6 @@ if __name__ == '__main__':
 
     for query_region in saasLoggingRegions.split(','):
         for query_log_type in saasTrafficTypes.split(','):
-            logging.info("Requesting log type '{}' for region '{}'".format(query_log_type, query_region))
             getLogsByRegionAndType(region=query_region, traffic_type=query_log_type)
 
     logging.info('Finished with queries, shutting down')
